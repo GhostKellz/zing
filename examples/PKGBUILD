@@ -1,0 +1,31 @@
+# Maintainer: Christopher Kelley <ckelley@ghostkellz.sh>
+pkgname=hello-world
+pkgver=1.0.0
+pkgrel=1
+pkgdesc="A simple hello world program for testing zmake"
+arch=('x86_64' 'i686')
+url="https://github.com/ghostkellz/hello-world"
+license=('MIT')
+depends=()
+makedepends=('gcc')
+source=("hello.c")
+sha256sums=('SKIP')
+
+prepare() {
+    echo "Preparing build environment..."
+}
+
+build() {
+    echo "Building hello world program..."
+    gcc -o hello hello.c
+}
+
+check() {
+    echo "Running tests..."
+    ./hello
+}
+
+package() {
+    echo "Installing hello world program..."
+    install -Dm755 hello "$pkgdir/usr/bin/hello"
+}

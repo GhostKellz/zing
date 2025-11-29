@@ -1,0 +1,35 @@
+[package]
+name = "hello-zmake"
+version = "1.0.0"
+description = "A simple hello world program built with zmake"
+url = "https://github.com/ghostkellz/hello-zmake"
+license = ["MIT"]
+arch = ["x86_64", "aarch64"]
+maintainer = "GhostKellz <ghost@example.com>"
+
+[build]
+type = "zig"  # Auto-detected: Zig project
+sources = [
+    "https://github.com/ghostkellz/hello-zmake/archive/v${version}.tar.gz"
+]
+checksums = ["SKIP"]
+
+[dependencies]
+runtime = ["glibc"]
+build = ["zig"]
+
+# Multi-architecture targets
+[[targets]]
+name = "linux-x64"
+triple = "x86_64-linux-gnu"
+optimize = "ReleaseFast"
+
+[[targets]]
+name = "linux-arm64"
+triple = "aarch64-linux-gnu"
+optimize = "ReleaseFast"
+
+[[targets]]
+name = "windows-x64"
+triple = "x86_64-windows-gnu"
+optimize = "ReleaseSmall"

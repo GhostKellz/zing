@@ -1,0 +1,42 @@
+[package]
+name = "neovim-nightly"
+version = "0.10.0"
+description = "Vim-fork focused on extensibility and usability"
+url = "https://neovim.io"
+license = ["Apache-2.0", "Vim"]
+arch = ["x86_64"]
+maintainer = "GhostKellz <ghost@example.com>"
+
+[build]
+type = "cmake"
+sources = [
+    "https://github.com/neovim/neovim/archive/v${version}.tar.gz",
+    "fix-cmake.patch"
+]
+checksums = [
+    "SKIP",
+    "d41d8cd98f00b204e9800998ecf8427e"
+]
+
+prepare_script = """
+patch -p1 < fix-cmake.patch
+"""
+
+build_script = """
+cmake -B build -S . \\
+    -DCMAKE_INSTALL_PREFIX=/usr \\
+    -DCMAKE_BUILD_TYPE=Release
+cmake --build build
+"""
+
+package_script = """
+cmake --install build --prefix "$pkgdir/usr"
+"""
+
+[dependencies]
+runtime = ["glibc", "libluajit", "libuv", "msgpack-c"]
+build = ["cmake", "ninja", "git", "luajit"]
+aur = ["tree-sitter-cli"]  # Build-time AUR dependency
+
+# Optional dependencies
+optional = ["python-pynvim", "xclip", "xsel"]

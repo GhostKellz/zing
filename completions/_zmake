@@ -1,0 +1,143 @@
+#compdef zmake
+# zmake zsh completion script
+# Install to: /usr/share/zsh/site-functions/_zmake
+
+_zmake() {
+    local context state line
+    typeset -A opt_args
+    
+    local commands=(
+        'help:Show help message'
+        'version:Show version information'
+        'init:Initialize a new build workspace'
+        'build:Build a package from PKGBUILD'
+        'package:Build and create package archive'
+        'clean:Clean build artifacts and cache'
+        'detect:Auto-detect project type'
+        'compile:Compile native project'
+        'cross:Cross-compile for specific target'
+        'zmk-init:Create zmk.toml configuration'
+        'zmk-build:Build from zmk.toml'
+        'aur-search:Search AUR packages'
+        'aur-install:Install AUR packages'
+        'multi-build:Build for multiple architectures'
+        'cache-stats:Show cache statistics'
+    )
+    
+    local global_opts=(
+        '(--help -h)'{--help,-h}'[Show help message]'
+        '(--version -v)'{--version,-v}'[Show version information]'
+        '--verbose[Enable verbose output]'
+        '--quiet[Suppress non-essential output]'
+        '--no-cache[Disable build caching]'
+        '--cache-size[Set cache size limit in MB]:size:(50 100 200 500 1000)'
+    )
+    
+    local targets=(
+        'x86_64-linux-gnu:Linux x64 (glibc)'
+        'x86_64-linux-musl:Linux x64 (musl)'
+        'x86_64-windows-gnu:Windows x64'
+        'x86_64-macos:macOS x64'
+        'aarch64-linux-gnu:ARM64 Linux (glibc)'
+        'aarch64-linux-musl:ARM64 Linux (musl)'
+        'aarch64-macos:macOS ARM64 (M1/M2)'
+        'arm-linux-gnueabihf:ARM32 Linux'
+        'riscv64-linux-gnu:RISC-V 64-bit'
+        'wasm32-wasi:WebAssembly (WASI)'
+        'wasm32-freestanding:WebAssembly (bare)'
+    )
+    
+    local target_sets=(
+        'desktop:Linux, Windows, macOS x64'
+        'embedded:ARM64, ARM32, RISC-V'
+        'web:WebAssembly targets'
+        'all:All supported platforms'
+    )
+
+    _arguments -C \
+        $global_opts \
+        '1: :->command' \
+        '*:: :->args' && return 0
+
+    case $state in
+        command)
+            _describe 'zmake commands' commands
+            ;;
+        args)
+            case $words[1] in
+                build)
+                    _arguments \
+                        '--force[Force rebuild even if cached]' \
+                        '--no-deps[Skip dependency checking]' \
+                        '--no-cache[Disable caching for this build]' \
+                        '*:PKGBUILD file:_files -g "*PKGBUILD*"'
+                    ;;
+                package)
+                    _arguments \
+                        '--sign[GPG sign package]:key:_gpg_keys' \
+                        '--output[Output directory]:directory:_directories' \
+                        '--compression[zstd compression level]:level:(1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22)' \
+                        '*:PKGBUILD file:_files -g "*PKGBUILD*"'
+                    ;;
+                compile)
+                    _arguments \
+                        '(--release --debug)'{--release,--debug}'[Build mode]' \
+                        '--target[Target triple]:target:((${targets[@]}))' \
+                        '--output[Output binary path]:path:_files' \
+                        '*:project directory:_directories'
+                    ;;
+                cross)
+                    _arguments \
+                        '--release[Build in release mode]' \
+                        '--features[CPU features]:features:' \
+                        '1:target:((${targets[@]}))' \
+                        '2:project directory:_directories'
+                    ;;
+                multi-build)
+                    _arguments \
+                        '--parallel[Max parallel builds]:count:(1 2 4 8 16)' \
+                        '--release[Build all targets in release mode]' \
+                        '--output[Output directory]:directory:_directories' \
+                        '1:target set:((${target_sets[@]}))' \
+                        '2:project directory:_directories'
+                    ;;
+                zmk-build)
+                    _arguments \
+                        '--target[Build specific target]:target:((${targets[@]}))' \
+                        '--no-aur[Skip AUR dependency resolution]' \
+                        '*:zmk.toml file:_files -g "*.toml"'
+                    ;;
+                aur-search)
+                    _arguments \
+                        '1:package name:'
+                    ;;
+                aur-install)
+                    _arguments \
+                        '--no-deps[Skip dependency resolution]' \
+                        '--force[Force reinstall if already installed]' \
+                        '--dry-run[Show install plan without installing]' \
+                        '1:package name:'
+                    ;;
+                clean)
+                    _arguments \
+                        '--all[Clean everything including cache]' \
+                        '--cache-only[Clean only cache]' \
+                        '--builds-only[Clean only build directories]'
+                    ;;
+                detect|zmk-init|init)
+                    _arguments \
+                        '*:directory:_directories'
+                    ;;
+            esac
+            ;;
+    esac
+}
+
+# Helper function for GPG keys
+_gpg_keys() {
+    local keys
+    keys=(${(f)"$(gpg --list-secret-keys --with-colons 2>/dev/null | awk -F: '/uid:/ {print $10}' | head -10)"})
+    _describe 'GPG keys' keys
+}
+
+_zmake "$@"

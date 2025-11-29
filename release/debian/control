@@ -1,0 +1,19 @@
+Package: zing
+Version: 0.1.0
+Section: devel
+Priority: optional
+Architecture: amd64
+Maintainer: Christopher Kelley <ckelley@ghostkellz.sh>
+Depends: libc6
+Recommends: git, tar, zstd
+Homepage: https://github.com/ghostkellz/zing
+Description: Next-generation build and packaging engine
+ Zing is a lightning-fast, modern build and packaging engine
+ written in Zig. It provides PKGBUILD compatibility, native
+ Zig/C/C++ compilation, and cross-platform build support.
+ .
+ Features:
+  - PKGBUILD compatible package building
+  - Native Zig/C/C++ project compilation
+  - Cross-compilation for multiple architectures
+  - Fast parallel builds with intelligent caching

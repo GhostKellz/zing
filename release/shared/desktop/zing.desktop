@@ -1,0 +1,12 @@
+[Desktop Entry]
+Name=Zing
+GenericName=Build Engine
+Comment=Next-generation build and packaging engine for Linux
+Exec=zing %F
+Icon=zing
+Terminal=true
+Type=Application
+Categories=Development;Building;
+Keywords=build;package;makepkg;zig;compile;
+StartupNotify=false
+MimeType=text/x-pkgbuild;

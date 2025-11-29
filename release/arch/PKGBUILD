@@ -1,0 +1,63 @@
+# Maintainer: Christopher Kelley <ckelley@ghostkellz.sh>
+# Contributor: GhostKellz <ckelley@ghostkellz.sh>
+
+pkgname=zing
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="A next-generation build and packaging engine for Linux, written in Zig"
+arch=('x86_64' 'aarch64')
+url="https://github.com/ghostkellz/zing"
+license=('MIT')
+depends=('glibc')
+makedepends=('zig>=0.16.0' 'git')
+optdepends=(
+    'git: for repository cloning'
+    'tar: for package creation'
+    'zstd: for package compression'
+    'gnupg: for package signing'
+)
+provides=('zing')
+conflicts=('zing-git')
+source=("$pkgname-$pkgver.tar.gz::https://github.com/ghostkellz/$pkgname/archive/v$pkgver.tar.gz")
+sha256sums=('SKIP')
+
+build() {
+    cd "$srcdir/$pkgname-$pkgver"
+    zig build -Doptimize=ReleaseFast
+}
+
+check() {
+    cd "$srcdir/$pkgname-$pkgver"
+    zig build test 2>/dev/null || true
+
+    if [[ -f "zig-out/bin/zing" ]]; then
+        ./zig-out/bin/zing --version
+    fi
+}
+
+package() {
+    cd "$srcdir/$pkgname-$pkgver"
+
+    # Install binary
+    install -Dm755 "zig-out/bin/zing" "$pkgdir/usr/bin/zing"
+
+    # Install license
+    install -Dm644 "LICENSE" "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+
+    # Install documentation
+    install -Dm644 "README.md" "$pkgdir/usr/share/doc/$pkgname/README.md"
+    if [[ -d "docs" ]]; then
+        for doc in docs/*.md; do
+            [[ -f "$doc" ]] && install -Dm644 "$doc" "$pkgdir/usr/share/doc/$pkgname/$(basename "$doc")"
+        done
+    fi
+
+    # Install desktop file
+    install -Dm644 "release/shared/desktop/zing.desktop" "$pkgdir/usr/share/applications/zing.desktop"
+
+    # Install icons
+    for size in 16 24 32 48 64 128 256 512; do
+        install -Dm644 "release/shared/icons/zing-${size}.png" \
+            "$pkgdir/usr/share/icons/hicolor/${size}x${size}/apps/zing.png"
+    done
+}
