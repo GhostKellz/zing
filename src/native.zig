@@ -1,6 +1,9 @@
 const std = @import("std");
 const print = std.debug.print;
 const Allocator = std.mem.Allocator;
+const Io = std.Io;
+const Dir = std.Io.Dir;
+const File = std.Io.File;
 
 pub const ProjectType = enum {
     zig,
@@ -12,6 +15,7 @@ pub const ProjectType = enum {
 
 pub const ZigProject = struct {
     allocator: Allocator,
+    io: Io,
     name: []const u8,
     version: []const u8,
     root_dir: []const u8,
@@ -25,6 +29,7 @@ pub const ZigProject = struct {
 
 pub const CProject = struct {
     allocator: Allocator,
+    io: Io,
     name: []const u8,
     version: []const u8,
     root_dir: []const u8,
@@ -47,35 +52,40 @@ pub const NativeProject = union {
     c: CProject,
 };
 
-fn readFileAlloc(allocator: Allocator, file: std.fs.File, max_size: usize) ![]u8 {
-    const stat = try file.stat();
+fn readFileAlloc(allocator: Allocator, io: Io, file: File, max_size: usize) ![]u8 {
+    const stat = try file.stat(io);
     const size: usize = @intCast(@min(stat.size, max_size));
     const buffer = try allocator.alloc(u8, size);
     errdefer allocator.free(buffer);
 
+    var read_buffer: [8192]u8 = undefined;
+    var reader = File.Reader.init(file, io, &read_buffer);
+
     var total_read: usize = 0;
     while (total_read < size) {
-        const bytes_read = try file.read(buffer[total_read..]);
+        const bytes_read = reader.interface.readSliceShort(buffer[total_read..]) catch {
+            break;
+        };
         if (bytes_read == 0) break;
         total_read += bytes_read;
     }
     return buffer[0..total_read];
 }
 
-pub fn detectProjectType(allocator: Allocator, project_dir: []const u8) !ProjectType {
+pub fn detectProjectType(allocator: Allocator, io: Io, project_dir: []const u8) !ProjectType {
     _ = allocator;
 
-    var dir = std.fs.cwd().openDir(project_dir, .{ .iterate = true }) catch {
+    var dir = Dir.cwd().openDir(io, project_dir, .{ .iterate = true }) catch {
         return .unknown;
     };
-    defer dir.close();
+    defer dir.close(io);
 
     var has_zig = false;
     var has_c = false;
     var has_cpp = false;
 
     var iter = dir.iterate();
-    while (try iter.next()) |entry| {
+    while (iter.next(io) catch null) |entry| {
         if (entry.kind == .file) {
             if (std.mem.eql(u8, entry.name, "build.zig")) {
                 has_zig = true;
@@ -99,21 +109,22 @@ pub fn detectProjectType(allocator: Allocator, project_dir: []const u8) !Project
     return .unknown;
 }
 
-pub fn analyzeZigProject(allocator: Allocator, project_dir: []const u8) !ZigProject {
+pub fn analyzeZigProject(allocator: Allocator, io: Io, project_dir: []const u8) !ZigProject {
     var project = ZigProject{
         .allocator = allocator,
+        .io = io,
         .name = try allocator.dupe(u8, "zig-project"),
         .version = try allocator.dupe(u8, "0.1.0"),
         .root_dir = try allocator.dupe(u8, project_dir),
     };
 
     // Try to read build.zig.zon for project info
-    const zon_path = try std.fs.path.join(allocator, &[_][]const u8{ project_dir, "build.zig.zon" });
+    const zon_path = try Dir.path.join(allocator, &[_][]const u8{ project_dir, "build.zig.zon" });
     defer allocator.free(zon_path);
 
-    if (std.fs.cwd().openFile(zon_path, .{})) |file| {
-        defer file.close();
-        const content = readFileAlloc(allocator, file, 1024 * 1024) catch null;
+    if (Dir.cwd().openFile(io, zon_path, .{})) |file| {
+        defer file.close(io);
+        const content = readFileAlloc(allocator, io, file, 1024 * 1024) catch null;
         if (content) |c| {
             defer allocator.free(c);
 
@@ -140,7 +151,7 @@ pub fn analyzeZigProject(allocator: Allocator, project_dir: []const u8) !ZigProj
     return project;
 }
 
-pub fn analyzeCProject(allocator: Allocator, project_dir: []const u8) !CProject {
+pub fn analyzeCProject(allocator: Allocator, io: Io, project_dir: []const u8) !CProject {
     var sources: std.ArrayListUnmanaged([]const u8) = .{};
     errdefer {
         for (sources.items) |s| allocator.free(s);
@@ -153,11 +164,11 @@ pub fn analyzeCProject(allocator: Allocator, project_dir: []const u8) !CProject 
         headers.deinit(allocator);
     }
 
-    var dir = try std.fs.cwd().openDir(project_dir, .{ .iterate = true });
-    defer dir.close();
+    var dir = try Dir.cwd().openDir(io, project_dir, .{ .iterate = true });
+    defer dir.close(io);
 
     var iter = dir.iterate();
-    while (try iter.next()) |entry| {
+    while (iter.next(io) catch null) |entry| {
         if (entry.kind == .file) {
             if (std.mem.endsWith(u8, entry.name, ".c") or
                 std.mem.endsWith(u8, entry.name, ".cpp") or
@@ -173,10 +184,11 @@ pub fn analyzeCProject(allocator: Allocator, project_dir: []const u8) !CProject 
     }
 
     // Extract project name from directory
-    const name = std.fs.path.basename(project_dir);
+    const name = Dir.path.basename(project_dir);
 
     return CProject{
         .allocator = allocator,
+        .io = io,
         .name = try allocator.dupe(u8, if (name.len > 0) name else "c-project"),
         .version = try allocator.dupe(u8, "0.1.0"),
         .root_dir = try allocator.dupe(u8, project_dir),
@@ -204,16 +216,24 @@ pub fn buildZigProject(allocator: Allocator, project: *ZigProject, target: ?[]co
         try args.append(allocator, target_arg);
     }
 
-    var child = std.process.Child.init(args.items, allocator);
-    if (project.root_dir.len > 0 and !std.mem.eql(u8, project.root_dir, ".")) {
-        child.cwd = project.root_dir;
-    }
-    child.stdout_behavior = .Inherit;
-    child.stderr_behavior = .Inherit;
+    var spawn_options: std.process.SpawnOptions = .{
+        .argv = args.items,
+    };
 
-    const result = try child.spawnAndWait();
-    if (result.Exited != 0) {
-        return error.BuildFailed;
+    if (project.root_dir.len > 0 and !std.mem.eql(u8, project.root_dir, ".")) {
+        spawn_options.cwd = project.root_dir;
+    }
+
+    var child = try std.process.spawn(project.io, spawn_options);
+    const result = try child.wait(project.io);
+
+    switch (result) {
+        .exited => |code| {
+            if (code != 0) {
+                return error.BuildFailed;
+            }
+        },
+        else => return error.BuildFailed,
     }
 
     print("==> Build successful\n", .{});
@@ -251,13 +271,18 @@ pub fn buildCProject(allocator: Allocator, project: *CProject, target: ?[]const 
         try args.append(allocator, target_arg);
     }
 
-    var child = std.process.Child.init(args.items, allocator);
-    child.stdout_behavior = .Inherit;
-    child.stderr_behavior = .Inherit;
+    var child = try std.process.spawn(project.io, .{
+        .argv = args.items,
+    });
+    const result = try child.wait(project.io);
 
-    const result = try child.spawnAndWait();
-    if (result.Exited != 0) {
-        return error.BuildFailed;
+    switch (result) {
+        .exited => |code| {
+            if (code != 0) {
+                return error.BuildFailed;
+            }
+        },
+        else => return error.BuildFailed,
     }
 
     print("==> Build successful: {s}\n", .{project.name});

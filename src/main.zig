@@ -1,6 +1,9 @@
 const std = @import("std");
 const print = std.debug.print;
 const Allocator = std.mem.Allocator;
+const Io = std.Io;
+const Dir = std.Io.Dir;
+const File = std.Io.File;
 const parser = @import("parser.zig");
 const builder = @import("builder.zig");
 const native = @import("native.zig");
@@ -17,16 +20,13 @@ const Command = enum {
     cross_compile,
 };
 
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
-
-    const args = try std.process.argsAlloc(allocator);
-    defer std.process.argsFree(allocator, args);
+pub fn main(init: std.process.Init) !void {
+    const allocator = init.gpa;
+    const io = init.io;
+    const args = try init.minimal.args.toSlice(init.arena.allocator());
 
     if (args.len < 2) {
-        try showHelp();
+        showHelp();
         return;
     }
 
@@ -37,22 +37,22 @@ pub fn main() !void {
     };
 
     switch (command) {
-        .help => try showHelp(),
-        .version => try showVersion(),
-        .init => try initWorkspace(allocator),
+        .help => showHelp(),
+        .version => showVersion(),
+        .init => try initWorkspace(io),
         .build => {
             const path = if (args.len > 2) args[2] else "PKGBUILD";
-            try buildFromPkgBuild(allocator, path);
+            try buildFromPkgBuild(allocator, io, path);
         },
         .package => {
             const path = if (args.len > 2) args[2] else "PKGBUILD";
-            try packageFromPkgBuild(allocator, path);
+            try packageFromPkgBuild(allocator, io, path);
         },
-        .clean => try cleanBuild(allocator),
-        .detect => try detectProjectType(allocator, "."),
+        .clean => try cleanBuild(io),
+        .detect => try detectProjectType(allocator, io, "."),
         .compile => {
             const release = args.len > 2 and std.mem.eql(u8, args[2], "--release");
-            try compileNativeProject(allocator, ".", null, release);
+            try compileNativeProject(allocator, io, ".", null, release);
         },
         .cross_compile => {
             if (args.len < 3) {
@@ -61,7 +61,7 @@ pub fn main() !void {
             }
             const target = args[2];
             const release = args.len > 3 and std.mem.eql(u8, args[3], "--release");
-            try compileNativeProject(allocator, ".", target, release);
+            try compileNativeProject(allocator, io, ".", target, release);
         },
     }
 }
@@ -91,7 +91,7 @@ fn parseCommand(arg: []const u8) !Command {
     return error.UnknownCommand;
 }
 
-fn showHelp() !void {
+fn showHelp() void {
     print(
         \\Zing - Next-Generation Build & Packaging Engine for Arch Linux
         \\
@@ -118,18 +118,17 @@ fn showHelp() !void {
     , .{});
 }
 
-fn showVersion() !void {
+fn showVersion() void {
     print(
         \\Zing v0.1.0 - Next-Generation Build & Packaging Engine
-        \\Built with Zig 0.16.0-dev
+        \\Built with Zig 0.16.0-dev.2193+fc517bd01
         \\Copyright (c) 2024-2025 GhostKellz
         \\Licensed under MIT License
         \\
     , .{});
 }
 
-fn initWorkspace(allocator: Allocator) !void {
-    _ = allocator;
+fn initWorkspace(io: Io) !void {
     print("Initializing zing workspace...\n", .{});
 
     const pkgbuild_content =
@@ -166,48 +165,57 @@ fn initWorkspace(allocator: Allocator) !void {
         \\}
     ;
 
-    var file = std.fs.cwd().createFile("PKGBUILD", .{}) catch |err| switch (err) {
+    const file = Dir.cwd().createFile(io, "PKGBUILD", .{ .exclusive = true }) catch |err| switch (err) {
         error.PathAlreadyExists => {
             print("PKGBUILD already exists, skipping...\n", .{});
             return;
         },
         else => return err,
     };
-    defer file.close();
+    defer file.close(io);
 
-    try file.writeAll(pkgbuild_content);
+    var buffer: [4096]u8 = undefined;
+    var writer = File.Writer.init(file, io, &buffer);
+    try writer.interface.print("{s}", .{pkgbuild_content});
+    try writer.interface.flush();
+
     print("Created example PKGBUILD\n", .{});
     print("Edit the PKGBUILD file and run 'zing build' to get started!\n", .{});
 }
 
-fn readFileAlloc(allocator: Allocator, file: std.fs.File, max_size: usize) ![]u8 {
-    const stat = try file.stat();
-    const size: usize = @intCast(@min(stat.size, max_size));
+fn readFileAlloc(allocator: Allocator, io: Io, file: File) ![]u8 {
+    const stat = try file.stat(io);
+    const size: usize = @intCast(@min(stat.size, 1024 * 1024));
     const buffer = try allocator.alloc(u8, size);
     errdefer allocator.free(buffer);
 
+    var read_buffer: [8192]u8 = undefined;
+    var reader = File.Reader.init(file, io, &read_buffer);
+
     var total_read: usize = 0;
     while (total_read < size) {
-        const bytes_read = try file.read(buffer[total_read..]);
+        const bytes_read = reader.interface.readSliceShort(buffer[total_read..]) catch {
+            break;
+        };
         if (bytes_read == 0) break;
         total_read += bytes_read;
     }
     return buffer[0..total_read];
 }
 
-fn runBuildPipeline(allocator: Allocator, path: []const u8, do_package: bool) !void {
+fn runBuildPipeline(allocator: Allocator, io: Io, path: []const u8, do_package: bool) !void {
     print("Building from: {s}\n", .{path});
 
-    const file = std.fs.cwd().openFile(path, .{}) catch |err| {
+    const file = Dir.cwd().openFile(io, path, .{}) catch |err| {
         if (err == error.FileNotFound) {
             print("PKGBUILD file not found: {s}\n", .{path});
             print("Run 'zing init' to create an example PKGBUILD\n", .{});
         }
         return err;
     };
-    defer file.close();
+    defer file.close(io);
 
-    const content = try readFileAlloc(allocator, file, 1024 * 1024);
+    const content = try readFileAlloc(allocator, io, file);
     defer allocator.free(content);
 
     var pkgbuild = try parser.parsePkgBuild(allocator, content);
@@ -219,7 +227,7 @@ fn runBuildPipeline(allocator: Allocator, path: []const u8, do_package: bool) !v
         return err;
     };
 
-    var ctx = builder.BuildContext.init(allocator, pkgbuild, content) catch |err| {
+    var ctx = builder.BuildContext.init(allocator, io, pkgbuild, content) catch |err| {
         print("Failed to initialize build context: {}\n", .{err});
         return err;
     };
@@ -246,22 +254,28 @@ fn runBuildPipeline(allocator: Allocator, path: []const u8, do_package: bool) !v
     }
 }
 
-fn buildFromPkgBuild(allocator: Allocator, path: []const u8) !void {
-    try runBuildPipeline(allocator, path, false);
+fn buildFromPkgBuild(allocator: Allocator, io: Io, path: []const u8) !void {
+    try runBuildPipeline(allocator, io, path, false);
 }
 
-fn packageFromPkgBuild(allocator: Allocator, path: []const u8) !void {
-    try runBuildPipeline(allocator, path, true);
+fn packageFromPkgBuild(allocator: Allocator, io: Io, path: []const u8) !void {
+    try runBuildPipeline(allocator, io, path, true);
 }
 
-fn cleanBuild(allocator: Allocator) !void {
-    try builder.cleanBuild(allocator);
+fn cleanBuild(io: Io) !void {
+    print("==> Cleaning build artifacts\n", .{});
+
+    Dir.cwd().deleteTree(io, "build") catch {};
+    Dir.cwd().deleteTree(io, "src") catch {};
+    Dir.cwd().deleteTree(io, "pkg") catch {};
+
+    print("==> Clean completed\n", .{});
 }
 
-fn detectProjectType(allocator: Allocator, project_dir: []const u8) !void {
+fn detectProjectType(allocator: Allocator, io: Io, project_dir: []const u8) !void {
     print("Detecting project type in: {s}\n", .{project_dir});
 
-    const project_type = native.detectProjectType(allocator, project_dir) catch |err| {
+    const project_type = native.detectProjectType(allocator, io, project_dir) catch |err| {
         print("Failed to detect project type: {}\n", .{err});
         return;
     };
@@ -269,7 +283,7 @@ fn detectProjectType(allocator: Allocator, project_dir: []const u8) !void {
     switch (project_type) {
         .zig => {
             print("Detected: Zig Project\n", .{});
-            var zig_project = native.analyzeZigProject(allocator, project_dir) catch |err| {
+            var zig_project = native.analyzeZigProject(allocator, io, project_dir) catch |err| {
                 print("Failed to analyze Zig project: {}\n", .{err});
                 return;
             };
@@ -280,7 +294,7 @@ fn detectProjectType(allocator: Allocator, project_dir: []const u8) !void {
         },
         .c => {
             print("Detected: C Project\n", .{});
-            var c_project = native.analyzeCProject(allocator, project_dir) catch |err| {
+            var c_project = native.analyzeCProject(allocator, io, project_dir) catch |err| {
                 print("Failed to analyze C project: {}\n", .{err});
                 return;
             };
@@ -291,7 +305,7 @@ fn detectProjectType(allocator: Allocator, project_dir: []const u8) !void {
         },
         .cpp => {
             print("Detected: C++ Project\n", .{});
-            var cpp_project = native.analyzeCProject(allocator, project_dir) catch |err| {
+            var cpp_project = native.analyzeCProject(allocator, io, project_dir) catch |err| {
                 print("Failed to analyze C++ project: {}\n", .{err});
                 return;
             };
@@ -311,7 +325,7 @@ fn detectProjectType(allocator: Allocator, project_dir: []const u8) !void {
     }
 }
 
-fn compileNativeProject(allocator: Allocator, project_dir: []const u8, target: ?[]const u8, release_mode: bool) !void {
+fn compileNativeProject(allocator: Allocator, io: Io, project_dir: []const u8, target: ?[]const u8, release_mode: bool) !void {
     const mode_str = if (release_mode) "release" else "debug";
 
     if (target) |t| {
@@ -320,7 +334,7 @@ fn compileNativeProject(allocator: Allocator, project_dir: []const u8, target: ?
         print("Compiling native project ({s} mode)\n", .{mode_str});
     }
 
-    const project_type = native.detectProjectType(allocator, project_dir) catch |err| {
+    const project_type = native.detectProjectType(allocator, io, project_dir) catch |err| {
         print("Failed to detect project type: {}\n", .{err});
         return;
     };
@@ -328,7 +342,7 @@ fn compileNativeProject(allocator: Allocator, project_dir: []const u8, target: ?
     switch (project_type) {
         .zig => {
             print("Detected: Zig Project\n", .{});
-            var zig_project = native.analyzeZigProject(allocator, project_dir) catch |err| {
+            var zig_project = native.analyzeZigProject(allocator, io, project_dir) catch |err| {
                 print("Failed to analyze Zig project: {}\n", .{err});
                 return;
             };
@@ -343,7 +357,7 @@ fn compileNativeProject(allocator: Allocator, project_dir: []const u8, target: ?
         },
         .c => {
             print("Detected: C Project\n", .{});
-            var c_project = native.analyzeCProject(allocator, project_dir) catch |err| {
+            var c_project = native.analyzeCProject(allocator, io, project_dir) catch |err| {
                 print("Failed to analyze C project: {}\n", .{err});
                 return;
             };
@@ -358,7 +372,7 @@ fn compileNativeProject(allocator: Allocator, project_dir: []const u8, target: ?
         },
         .cpp => {
             print("Detected: C++ Project\n", .{});
-            var cpp_project = native.analyzeCProject(allocator, project_dir) catch |err| {
+            var cpp_project = native.analyzeCProject(allocator, io, project_dir) catch |err| {
                 print("Failed to analyze C++ project: {}\n", .{err});
                 return;
             };

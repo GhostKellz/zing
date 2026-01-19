@@ -1,10 +1,13 @@
 const std = @import("std");
 const print = std.debug.print;
 const Allocator = std.mem.Allocator;
+const Io = std.Io;
+const Dir = std.Io.Dir;
 const parser = @import("parser.zig");
 
 pub const BuildContext = struct {
     allocator: Allocator,
+    io: Io,
     pkgbuild: parser.PkgBuild,
     content: []const u8,
     cache_dir: []const u8,
@@ -12,17 +15,9 @@ pub const BuildContext = struct {
     src_dir: []const u8,
     pkg_dir: []const u8,
 
-    pub fn init(allocator: Allocator, pkgbuild: parser.PkgBuild, content: []const u8) !BuildContext {
-        // Determine cache directory
-        const cache_dir = blk: {
-            if (std.posix.getenv("ZING_CACHE_DIR")) |custom| {
-                break :blk try allocator.dupe(u8, custom);
-            }
-            if (std.posix.getenv("HOME")) |home| {
-                break :blk try std.fs.path.join(allocator, &[_][]const u8{ home, ".cache", "zing" });
-            }
-            break :blk try allocator.dupe(u8, "/tmp/zing-cache");
-        };
+    pub fn init(allocator: Allocator, io: Io, pkgbuild: parser.PkgBuild, content: []const u8) !BuildContext {
+        // Use a simple cache directory - can be enhanced later with env var support
+        const cache_dir = try allocator.dupe(u8, ".zing-cache");
 
         // Create build directories
         const build_dir = try allocator.dupe(u8, "build");
@@ -30,17 +25,18 @@ pub const BuildContext = struct {
         const pkg_dir = try allocator.dupe(u8, "pkg");
 
         // Create directories
-        std.fs.cwd().makePath(cache_dir) catch |err| switch (err) {
+        Dir.cwd().createDirPath(io, cache_dir) catch |err| switch (err) {
             error.PathAlreadyExists => {},
             else => return err,
         };
-        std.fs.cwd().makePath(build_dir) catch |err| switch (err) {
+        Dir.cwd().createDirPath(io, build_dir) catch |err| switch (err) {
             error.PathAlreadyExists => {},
             else => return err,
         };
 
         return BuildContext{
             .allocator = allocator,
+            .io = io,
             .pkgbuild = pkgbuild,
             .content = content,
             .cache_dir = cache_dir,
@@ -67,13 +63,13 @@ pub fn prepareBuild(ctx: *BuildContext) !void {
     });
 
     // Create pkg directory
-    std.fs.cwd().makePath(ctx.pkg_dir) catch |err| switch (err) {
+    Dir.cwd().createDirPath(ctx.io, ctx.pkg_dir) catch |err| switch (err) {
         error.PathAlreadyExists => {},
         else => return err,
     };
 
     // Create src directory
-    std.fs.cwd().makePath(ctx.src_dir) catch |err| switch (err) {
+    Dir.cwd().createDirPath(ctx.io, ctx.src_dir) catch |err| switch (err) {
         error.PathAlreadyExists => {},
         else => return err,
     };
@@ -90,7 +86,7 @@ pub fn buildPackage(ctx: *BuildContext) !void {
 
     if (build_script) |script| {
         print("==> Running build() function\n", .{});
-        try executeBashScript(ctx.allocator, script);
+        try executeBashScript(ctx.io, script);
     } else {
         print("   No build() function found\n", .{});
     }
@@ -107,7 +103,7 @@ pub fn packageFiles(ctx: *BuildContext) !void {
 
     if (package_script) |script| {
         print("==> Running package() function\n", .{});
-        try executeBashScript(ctx.allocator, script);
+        try executeBashScript(ctx.io, script);
     }
 
     // Create package archive
@@ -144,21 +140,20 @@ fn extractFunction(allocator: Allocator, content: []const u8, func_name: []const
     return try allocator.dupe(u8, content[brace_start + 1 .. pos - 1]);
 }
 
-fn executeBashScript(allocator: Allocator, script: []const u8) !void {
-    var child = std.process.Child.init(&[_][]const u8{ "bash", "-c", script }, allocator);
-    child.stdout_behavior = .Inherit;
-    child.stderr_behavior = .Inherit;
+fn executeBashScript(io: Io, script: []const u8) !void {
+    var child = try std.process.spawn(io, .{
+        .argv = &[_][]const u8{ "bash", "-c", script },
+    });
 
-    _ = try child.spawnAndWait();
+    _ = try child.wait(io);
 }
 
-pub fn cleanBuild(allocator: Allocator) !void {
-    _ = allocator;
+pub fn cleanBuild(io: Io) !void {
     print("==> Cleaning build artifacts\n", .{});
 
-    std.fs.cwd().deleteTree("build") catch {};
-    std.fs.cwd().deleteTree("src") catch {};
-    std.fs.cwd().deleteTree("pkg") catch {};
+    Dir.cwd().deleteTree(io, "build") catch {};
+    Dir.cwd().deleteTree(io, "src") catch {};
+    Dir.cwd().deleteTree(io, "pkg") catch {};
 
     print("==> Clean completed\n", .{});
 }
