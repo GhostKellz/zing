@@ -102,7 +102,7 @@ fn showHelp() void {
         \\    init                 Initialize a new build workspace
         \\    build [PKGBUILD]     Build a package from PKGBUILD (default: ./PKGBUILD)
         \\    package [PKGBUILD]   Build and package from PKGBUILD
-        \\    clean                Clean build cache and artifacts
+        \\    clean                Remove .zing-work and .zing-cache
         \\
         \\NATIVE COMPILATION:
         \\    detect               Auto-detect project type (Zig/C/C++)
@@ -121,7 +121,6 @@ fn showHelp() void {
 fn showVersion() void {
     print(
         \\Zing v0.1.0 - Next-Generation Build & Packaging Engine
-        \\Built with Zig 0.16.0-dev.2193+fc517bd01
         \\Copyright (c) 2024-2025 GhostKellz
         \\Licensed under MIT License
         \\
@@ -142,8 +141,8 @@ fn initWorkspace(io: Io) !void {
         \\license=('MIT')
         \\depends=()
         \\makedepends=('gcc')
-        \\source=("my-package-${pkgver}.tar.gz")
-        \\sha256sums('SKIP')
+        \\source=("${pkgname}-${pkgver}.tar.gz")
+        \\sha256sums=('SKIP')
         \\
         \\prepare() {
         \\    echo "Preparing build environment..."
@@ -227,7 +226,7 @@ fn runBuildPipeline(allocator: Allocator, io: Io, path: []const u8, do_package: 
         return err;
     };
 
-    var ctx = builder.BuildContext.init(allocator, io, pkgbuild, content) catch |err| {
+    var ctx = builder.BuildContext.init(allocator, io, pkgbuild, content, path) catch |err| {
         print("Failed to initialize build context: {}\n", .{err});
         return err;
     };
@@ -265,9 +264,8 @@ fn packageFromPkgBuild(allocator: Allocator, io: Io, path: []const u8) !void {
 fn cleanBuild(io: Io) !void {
     print("==> Cleaning build artifacts\n", .{});
 
-    Dir.cwd().deleteTree(io, "build") catch {};
-    Dir.cwd().deleteTree(io, "src") catch {};
-    Dir.cwd().deleteTree(io, "pkg") catch {};
+    Dir.cwd().deleteTree(io, ".zing-work") catch {};
+    Dir.cwd().deleteTree(io, ".zing-cache") catch {};
 
     print("==> Clean completed\n", .{});
 }

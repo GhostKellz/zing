@@ -131,7 +131,7 @@ pub fn executeScript(allocator: Allocator, script: []const u8, env: *const Build
     print("==> Executing script in: {s}\n", .{working_dir});
 
     // Create temporary script file
-    const script_path = try std.fs.path.join(allocator, &[_][]const u8{ working_dir, "zmake_script.sh" });
+    const script_path = try std.fs.path.join(allocator, &[_][]const u8{ working_dir, "zing_script.sh" });
     defer allocator.free(script_path);
 
     var script_file = try std.fs.cwd().createFile(script_path, .{ .mode = 0o755 });

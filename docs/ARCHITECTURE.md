@@ -1,204 +1,64 @@
-# 🏗️ Zing Architecture
-
-This document describes the internal architecture and design of Zing.
-
----
+# Zing Architecture
 
 ## Overview
 
-Zing is built using a modular architecture where each component handles a specific aspect of the build process:
+The current codebase is organized around three primary paths:
 
-```
-┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
-│   CLI Parser    │───▶│  Build Context  │───▶│   Execution     │
-│   (main.zig)    │    │  (builder.zig)  │    │                 │
-└─────────────────┘    └─────────────────┘    └─────────────────┘
-         │                       │
-         ▼                       ▼
-┌─────────────────┐    ┌─────────────────┐
-│  Configuration  │    │  Native Builds  │
-│  (parser.zig)   │    │  (native.zig)   │
-└─────────────────┘    └─────────────────┘
-```
+- `src/main.zig`: CLI entrypoint and command dispatch
+- `src/parser.zig` + `src/builder.zig`: PKGBUILD parsing and execution
+- `src/native.zig`: Zig/C/C++ project detection and compilation
 
----
+## PKGBUILD Path
 
-## Core Components
+`zing build` and `zing package` follow this flow:
 
-### 1. CLI Parser (`main.zig`)
+1. Read the target `PKGBUILD`
+2. Parse a limited metadata subset in `src/parser.zig`
+3. Build a `BuildContext` in `src/builder.zig`
+4. Preflight `depends` and `makedepends` against the local pacman database when available
+5. Stage sources under `.zing-work/src/` and cache downloads under `.zing-cache/`
+6. Run `prepare()`, `build()`, and `check()` if present
+7. For `zing package`, run `package()`, archive `.zing-work/pkg/`, and verify the resulting package metadata
 
-The main entry point that handles:
-- Command-line argument parsing
-- Command routing
-- Help and version display
-- Error handling and user feedback
+This path is intentionally simple. It is not yet a full `makepkg` implementation.
 
-```zig
-const Command = enum {
-    help,
-    version,
-    init,
-    build,
-    package,
-    clean,
-    detect,
-    compile,
-    cross_compile,
-};
-```
+## Native Build Path
 
-### 2. PKGBUILD Parser (`parser.zig`)
+`src/native.zig` detects projects by scanning the target directory for:
 
-Parses traditional PKGBUILD files and extracts metadata:
+- `build.zig` or `.zig` files
+- `.c` files
+- `.cpp`, `.cc`, or `.cxx` files
 
-```zig
-pub const PkgBuild = struct {
-    pkgname: []const u8,
-    pkgver: []const u8,
-    pkgrel: []const u8,
-    pkgdesc: ?[]const u8,
-    arch: [][]const u8,
-    url: ?[]const u8,
-    license: [][]const u8,
-    depends: [][]const u8,
-    makedepends: [][]const u8,
-    source: [][]const u8,
-    sha256sums: [][]const u8,
-};
-```
+Based on the result:
 
-**Features:**
-- Supports all standard PKGBUILD variables
-- Handles bash arrays and string escaping
-- Validates required fields
-- Memory-safe parsing with proper cleanup
+- Zig projects run `zig build`
+- C and C++ projects run `zig cc`
+- Mixed projects are detected but not fully supported by the CLI
 
-### 3. Build Orchestrator (`builder.zig`)
+## Supporting Modules
 
-Coordinates the entire build process:
+Additional modules exist for future or partial functionality:
 
-```zig
-pub const BuildContext = struct {
-    allocator: Allocator,
-    pkgbuild: parser.PkgBuild,
-    cache_dir: []const u8,
-    build_dir: []const u8,
-    src_dir: []const u8,
-    pkg_dir: []const u8,
-};
-```
+- `src/cache.zig`
+- `src/deps.zig`
+- `src/packager.zig`
+- `src/aur.zig`
+- `src/multiarch.zig`
+- `src/zmk.zig`
 
-**Build Pipeline:**
-1. **Preparation** - Create build directories
-2. **Script Extraction** - Parse PKGBUILD functions
-3. **Execution** - Run build/package functions via bash
-4. **Packaging** - Create final package archive
+Current state:
 
-### 4. Native Project Compiler (`native.zig`)
+- `src/deps.zig` is wired into the PKGBUILD flow for local dependency preflight
+- `src/packager.zig` is wired into `zing package`
+- `src/aur.zig`, `src/cache.zig`, `src/multiarch.zig`, and `src/zmk.zig` remain incomplete and are not exposed by the CLI
 
-Handles native Zig/C/C++ project compilation:
+## Testing
 
-```zig
-pub const ProjectType = enum {
-    zig,
-    c,
-    cpp,
-    mixed,
-    unknown,
-};
-```
+The project now includes focused unit coverage for:
 
-**Features:**
-- Auto-detection of project types
-- Zig compiler integration
-- Cross-compilation support
-- Build metadata extraction from build.zig.zon
+- parser field parsing and validation
+- PKGBUILD function extraction
+- native project detection and metadata parsing
 
----
-
-## Data Flow
-
-### PKGBUILD Build Flow
-
-```
-1. User runs: zing build
-           │
-           ▼
-2. main.zig parses command
-           │
-           ▼
-3. parser.zig reads PKGBUILD
-           │
-           ▼
-4. builder.zig creates BuildContext
-           │
-           ▼
-5. Extract build() function
-           │
-           ▼
-6. Execute via bash subprocess
-           │
-           ▼
-7. Create package archive
-```
-
-### Native Compilation Flow
-
-```
-1. User runs: zing compile
-           │
-           ▼
-2. native.zig detects project type
-           │
-           ▼
-3. Analyze project (sources, version)
-           │
-           ▼
-4. Invoke zig build / zig cc
-           │
-           ▼
-5. Report success/failure
-```
-
----
-
-## Memory Management
-
-Zing uses Zig's allocator pattern throughout:
-
-- **GeneralPurposeAllocator** for main program
-- **ArenaAllocator** for temporary allocations
-- Explicit `deinit()` calls for cleanup
-- `errdefer` for error-path cleanup
-
-```zig
-var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-defer _ = gpa.deinit();
-const allocator = gpa.allocator();
-```
-
----
-
-## Error Handling
-
-All functions use Zig's error union pattern:
-
-```zig
-pub fn parsePkgBuild(allocator: Allocator, content: []const u8) !PkgBuild {
-    // Returns error or value
-}
-```
-
-Errors are propagated up with meaningful context and displayed to the user.
-
----
-
-## Future Architecture
-
-Planned additions:
-
-- **Cache System** - Content-addressable build cache
-- **Dependency Resolver** - Pacman database integration
-- **Parallel Downloader** - HTTP client for sources
-- **Package Archiver** - tar.zst creation
-- **AUR Client** - RPC API integration
+`zig build test` is the baseline verification target.

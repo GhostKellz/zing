@@ -1,13 +1,10 @@
 const std = @import("std");
+const builtin = @import("builtin");
 
 pub fn main() !void {
-    const stdout = std.io.getStdOut().writer();
-    try stdout.print("Hello from Zig compiled with zmake! 🚀\n");
-
-    // Show some system info
-    const target = @import("builtin").target;
-    try stdout.print("Target: {s}-{s}\n", .{ @tagName(target.cpu.arch), @tagName(target.os.tag) });
-    try stdout.print("Zig version: {}\n", .{@import("builtin").zig_version});
+    std.debug.print("Hello from Zig compiled with Zing!\n", .{});
+    std.debug.print("Target: {s}-{s}\n", .{ @tagName(builtin.target.cpu.arch), @tagName(builtin.target.os.tag) });
+    std.debug.print("Zig version: {}\n", .{builtin.zig_version});
 }
 
 test "simple test" {

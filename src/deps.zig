@@ -2,6 +2,7 @@ const std = @import("std");
 const print = std.debug.print;
 const Allocator = std.mem.Allocator;
 const ArrayList = std.ArrayList;
+const Io = std.Io;
 
 pub const VersionConstraint = enum {
     none,
@@ -18,7 +19,6 @@ pub const Dependency = struct {
     constraint: VersionConstraint,
 
     pub fn parse(allocator: Allocator, dep_string: []const u8) !Dependency {
-        // Parse dependency strings like "gcc>=4.7", "python=3.9", "glibc"
         var name = dep_string;
         var version: ?[]const u8 = null;
         var constraint = VersionConstraint.none;
@@ -71,16 +71,18 @@ pub const PackageInfo = struct {
 
 pub const DependencyResolver = struct {
     allocator: Allocator,
+    io: Io,
     installed_packages: std.StringHashMap(PackageInfo),
+    package_db_available: bool,
 
-    pub fn init(allocator: Allocator) !DependencyResolver {
-        var resolver = DependencyResolver{
+    pub fn init(allocator: Allocator, io: Io) !DependencyResolver {
+        const package_db_available = hasPacman(io) catch false;
+        return DependencyResolver{
             .allocator = allocator,
+            .io = io,
             .installed_packages = std.StringHashMap(PackageInfo).init(allocator),
+            .package_db_available = package_db_available,
         };
-
-        try resolver.loadInstalledPackages();
-        return resolver;
     }
 
     pub fn deinit(self: *DependencyResolver) void {
@@ -92,112 +94,83 @@ pub const DependencyResolver = struct {
         self.installed_packages.deinit();
     }
 
-    fn loadInstalledPackages(self: *DependencyResolver) !void {
-        print("==> Loading installed packages from pacman database...\n", .{});
+    fn readFileAlloc(self: *DependencyResolver, file: std.Io.File, max_size: usize) ![]u8 {
+        var result: ArrayList(u8) = .empty;
+        defer result.deinit(self.allocator);
 
-        // Query pacman for installed packages
-        var child = std.process.Child.init(&[_][]const u8{ "pacman", "-Q" }, self.allocator);
-        child.stdout_behavior = .Pipe;
-        child.stderr_behavior = .Pipe;
+        var read_buffer: [4096]u8 = undefined;
+        var reader = std.Io.File.Reader.init(file, self.io, &read_buffer);
+        var chunk: [4096]u8 = undefined;
 
-        child.spawn() catch |err| {
-            print("⚠️  Could not query pacman database: {}\n", .{err});
-            return;
-        };
-
-        const stdout = child.stdout.?.readToEndAlloc(self.allocator, 10 * 1024 * 1024) catch {
-            print("⚠️  Failed to read pacman output\n", .{});
-            return;
-        };
-        defer self.allocator.free(stdout);
-
-        const result = child.wait() catch {
-            print("⚠️  Pacman query failed\n", .{});
-            return;
-        };
-
-        if (result != .Exited or result.Exited != 0) {
-            print("⚠️  Pacman returned error code\n", .{});
-            return;
+        while (result.items.len < max_size) {
+            const remaining = max_size - result.items.len;
+            const limit = @min(chunk.len, remaining);
+            const bytes_read = try reader.interface.readSliceShort(chunk[0..limit]);
+            if (bytes_read == 0) break;
+            try result.appendSlice(self.allocator, chunk[0..bytes_read]);
         }
 
-        // Parse pacman output (format: "package-name version")
-        var lines = std.mem.splitScalar(u8, stdout, '\n');
-        var count: u32 = 0;
-
-        while (lines.next()) |line| {
-            const trimmed = std.mem.trim(u8, line, " \t\r\n");
-            if (trimmed.len == 0) continue;
-
-            var parts = std.mem.splitScalar(u8, trimmed, ' ');
-            const name = parts.next() orelse continue;
-            const version = parts.next() orelse continue;
-
-            const pkg_info = PackageInfo{
-                .name = try self.allocator.dupe(u8, name),
-                .version = try self.allocator.dupe(u8, version),
-                .installed = true,
-            };
-
-            try self.installed_packages.put(try self.allocator.dupe(u8, name), pkg_info);
-            count += 1;
-        }
-
-        print("✅ Loaded {d} installed packages\n", .{count});
+        return try result.toOwnedSlice(self.allocator);
     }
 
     pub fn checkDependencies(self: *DependencyResolver, deps: []const []const u8) ![]Dependency {
-        var missing_deps = ArrayList(Dependency).init(self.allocator);
-        defer missing_deps.deinit();
+        if (!self.package_db_available) {
+            print("⚠️  Skipping dependency preflight because pacman is unavailable\n", .{});
+            return try self.allocator.alloc(Dependency, 0);
+        }
+
+        if (deps.len == 0) {
+            return try self.allocator.alloc(Dependency, 0);
+        }
 
         print("==> Checking dependencies...\n", .{});
 
-        for (deps) |dep_string| {
-            var dep = try Dependency.parse(self.allocator, dep_string);
+        var argv: std.ArrayListUnmanaged([]const u8) = .empty;
+        defer argv.deinit(self.allocator);
 
-            const installed_pkg = self.installed_packages.get(dep.name);
+        try argv.append(self.allocator, "pacman");
+        try argv.append(self.allocator, "-T");
+        try argv.appendSlice(self.allocator, deps);
 
-            if (installed_pkg == null) {
-                print("❌ Missing dependency: {s}\n", .{dep.name});
-                try missing_deps.append(dep);
-                continue;
-            }
+        var child = try std.process.spawn(self.io, .{
+            .argv = argv.items,
+            .stdout = .pipe,
+            .stderr = .pipe,
+        });
 
-            const pkg = installed_pkg.?;
+        const stdout = try self.readFileAlloc(child.stdout.?, 1024 * 1024);
+        defer self.allocator.free(stdout);
 
-            // Check version constraints
-            if (dep.version != null) {
-                const satisfies = try self.checkVersionConstraint(pkg.version, dep.version.?, dep.constraint);
-                if (!satisfies) {
-                    print("❌ Version constraint not satisfied: {s} (installed: {s}, required: {s}{s})\n", .{
-                        dep.name,
-                        pkg.version,
-                        @tagName(dep.constraint),
-                        dep.version.?,
-                    });
-                    try missing_deps.append(dep);
-                    continue;
-                }
-            }
+        const stderr = try self.readFileAlloc(child.stderr.?, 1024 * 1024);
+        defer self.allocator.free(stderr);
 
-            print("✅ Dependency satisfied: {s} ({s})\n", .{ dep.name, pkg.version });
-            dep.deinit(self.allocator);
+        const result = try child.wait(self.io);
+        if (result != .exited) return error.DependencyCheckFailed;
+        if (result.exited != 0 and stdout.len == 0) {
+            if (stderr.len > 0) print("⚠️  pacman -T failed:\n{s}\n", .{stderr});
+            return error.DependencyCheckFailed;
         }
 
-        return try missing_deps.toOwnedSlice();
-    }
+        var missing_deps: ArrayList(Dependency) = .empty;
+        defer missing_deps.deinit(self.allocator);
 
-    fn checkVersionConstraint(self: *DependencyResolver, installed: []const u8, required: []const u8, constraint: VersionConstraint) !bool {
-        _ = self;
+        var missing_lines = std.mem.splitScalar(u8, stdout, '\n');
+        while (missing_lines.next()) |line| {
+            const trimmed = std.mem.trim(u8, line, " \t\r\n");
+            if (trimmed.len == 0) continue;
 
-        switch (constraint) {
-            .none => return true,
-            .equal => return std.mem.eql(u8, installed, required),
-            .greater_equal => return try compareVersions(installed, required) >= 0,
-            .less_equal => return try compareVersions(installed, required) <= 0,
-            .greater => return try compareVersions(installed, required) > 0,
-            .less => return try compareVersions(installed, required) < 0,
+            const dep = try Dependency.parse(self.allocator, trimmed);
+            print("❌ Missing dependency: {s}\n", .{trimmed});
+            try missing_deps.append(self.allocator, dep);
         }
+
+        if (missing_deps.items.len == 0) {
+            for (deps) |dep| {
+                print("✅ Dependency satisfied: {s}\n", .{dep});
+            }
+        }
+
+        return try missing_deps.toOwnedSlice(self.allocator);
     }
 
     pub fn suggestAURPackages(self: *DependencyResolver, missing_deps: []const Dependency) !void {
@@ -205,33 +178,21 @@ pub const DependencyResolver = struct {
 
         if (missing_deps.len == 0) return;
 
-        print("\n==> Missing dependencies can potentially be found in AUR:\n", .{});
+        print("\n==> If any missing dependencies are AUR-only, install them with your preferred helper. Example:\n", .{});
         for (missing_deps) |dep| {
             print("    yay -S {s}\n", .{dep.name});
         }
-        print("💡 Run these commands or implement AUR support in zmake\n", .{});
+        print("    Use pacman for official repo packages when available.\n", .{});
     }
 };
 
-fn compareVersions(v1: []const u8, v2: []const u8) !i8 {
-    // Simple version comparison (could be more sophisticated)
-    var parts1 = std.mem.splitSequence(u8, v1, ".");
-    var parts2 = std.mem.splitSequence(u8, v2, ".");
+fn hasPacman(io: Io) !bool {
+    var child = std.process.spawn(io, .{
+        .argv = &[_][]const u8{ "pacman", "-V" },
+    }) catch return false;
 
-    while (true) {
-        const p1 = parts1.next();
-        const p2 = parts2.next();
-
-        if (p1 == null and p2 == null) return 0;
-        if (p1 == null) return -1;
-        if (p2 == null) return 1;
-
-        const n1 = std.fmt.parseInt(u32, p1.?, 10) catch 0;
-        const n2 = std.fmt.parseInt(u32, p2.?, 10) catch 0;
-
-        if (n1 < n2) return -1;
-        if (n1 > n2) return 1;
-    }
+    const result = try child.wait(io);
+    return result == .exited and result.exited == 0;
 }
 
 pub fn checkConflicts(allocator: Allocator, conflicts: []const []const u8, resolver: *DependencyResolver) ![][]const u8 {
@@ -239,11 +200,15 @@ pub fn checkConflicts(allocator: Allocator, conflicts: []const []const u8, resol
     defer conflicting.deinit();
 
     if (conflicts.len == 0) return &[_][]const u8{};
+    if (!resolver.package_db_available) return &[_][]const u8{};
 
     print("==> Checking for conflicts...\n", .{});
-
     for (conflicts) |conflict_name| {
-        if (resolver.installed_packages.contains(conflict_name)) {
+        var child = std.process.spawn(resolver.io, .{
+            .argv = &[_][]const u8{ "pacman", "-Q", conflict_name },
+        }) catch continue;
+        const result = child.wait(resolver.io) catch continue;
+        if (result == .exited and result.exited == 0) {
             print("⚠️  Conflict detected: {s} is installed\n", .{conflict_name});
             try conflicting.append(try allocator.dupe(u8, conflict_name));
         }

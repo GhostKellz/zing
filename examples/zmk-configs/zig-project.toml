@@ -1,8 +1,8 @@
 [package]
-name = "hello-zmake"
+name = "hello-zing"
 version = "1.0.0"
-description = "A simple hello world program built with zmake"
-url = "https://github.com/ghostkellz/hello-zmake"
+description = "A simple hello world program built with zing"
+url = "https://github.com/ghostkellz/hello-zing"
 license = ["MIT"]
 arch = ["x86_64", "aarch64"]
 maintainer = "GhostKellz <ghost@example.com>"
@@ -10,7 +10,7 @@ maintainer = "GhostKellz <ghost@example.com>"
 [build]
 type = "zig"  # Auto-detected: Zig project
 sources = [
-    "https://github.com/ghostkellz/hello-zmake/archive/v${version}.tar.gz"
+    "https://github.com/ghostkellz/hello-zing/archive/v${version}.tar.gz"
 ]
 checksums = ["SKIP"]
 

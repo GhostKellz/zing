@@ -33,7 +33,7 @@ pub const AurClient = struct {
     cache_dir: []const u8,
 
     pub fn init(allocator: Allocator) !AurClient {
-        const cache_dir = try std.fs.path.join(allocator, &[_][]const u8{ std.os.getenv("HOME") orelse "/tmp", ".cache", "zmake", "aur" });
+        const cache_dir = try std.fs.path.join(allocator, &[_][]const u8{ std.os.getenv("HOME") orelse "/tmp", ".cache", "zing", "aur" });
 
         // Create cache directory
         std.fs.cwd().makePath(cache_dir) catch |err| switch (err) {
@@ -221,7 +221,7 @@ pub const AurClient = struct {
             return error.NoPkgBuild;
         };
 
-        // Build with makepkg (for now, later integrate with zmake)
+        // Build with makepkg for now; native integration can replace this later.
         var child = std.process.Child.init(&[_][]const u8{ "makepkg", "-si", "--noconfirm" }, self.allocator);
 
         child.cwd = clone_dir;

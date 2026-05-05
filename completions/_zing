@@ -1,0 +1,58 @@
+#compdef zing
+
+_zing() {
+    local context state line
+    typeset -A opt_args
+
+    local commands=(
+        'help:Show help message'
+        'version:Show version information'
+        'init:Create example PKGBUILD'
+        'build:Run PKGBUILD build pipeline'
+        'package:Build and package PKGBUILD output'
+        'clean:Remove local build directories'
+        'detect:Detect project type'
+        'compile:Compile current project'
+        'cross:Cross-compile current project'
+    )
+
+    local targets=(
+        'x86_64-linux-gnu:Linux x64 (glibc)'
+        'x86_64-linux-musl:Linux x64 (musl)'
+        'x86_64-windows-gnu:Windows x64'
+        'x86_64-macos:macOS x64'
+        'aarch64-linux-gnu:ARM64 Linux'
+        'aarch64-linux-musl:ARM64 Linux (musl)'
+        'aarch64-macos:macOS ARM64'
+        'arm-linux-gnueabihf:ARM32 Linux'
+        'riscv64-linux-gnu:RISC-V 64-bit'
+        'wasm32-wasi:WebAssembly (WASI)'
+    )
+
+    _arguments -C \
+        '1: :->command' \
+        '*:: :->args' && return 0
+
+    case $state in
+        command)
+            _describe 'zing commands' commands
+            ;;
+        args)
+            case $words[1] in
+                build|package)
+                    _arguments '*:PKGBUILD file:_files -g "*PKGBUILD*"'
+                    ;;
+                compile)
+                    _arguments '--release[Build in release mode]' '*:project directory:_directories'
+                    ;;
+                cross)
+                    _arguments '--release[Build in release mode]' '1:target:((${targets[@]}))'
+                    ;;
+                detect|init|clean|help|version)
+                    ;;
+            esac
+            ;;
+    esac
+}
+
+_zing "$@"

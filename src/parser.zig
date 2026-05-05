@@ -117,17 +117,33 @@ fn parseArrayValue(allocator: Allocator, line: []const u8) ![][]const u8 {
     const content = std.mem.trim(u8, line[start + 1 .. end], " \t");
     if (content.len == 0) return &[_][]const u8{};
 
-    var result: std.ArrayListUnmanaged([]const u8) = .{};
+    var result: std.ArrayListUnmanaged([]const u8) = .empty;
     errdefer {
         for (result.items) |item| allocator.free(item);
         result.deinit(allocator);
     }
 
-    var items = std.mem.splitScalar(u8, content, ' ');
-    while (items.next()) |item| {
-        const trimmed = std.mem.trim(u8, item, " \t'\"");
-        if (trimmed.len > 0) {
-            try result.append(allocator, try allocator.dupe(u8, trimmed));
+    var i: usize = 0;
+    while (i < content.len) {
+        while (i < content.len and (content[i] == ' ' or content[i] == '\t')) : (i += 1) {}
+        if (i >= content.len) break;
+
+        const quote = if (content[i] == '\'' or content[i] == '"') content[i] else null;
+        const item_start = if (quote != null) i + 1 else i;
+        if (quote != null) i += 1;
+
+        var item_end = item_start;
+        if (quote) |q| {
+            while (item_end < content.len and content[item_end] != q) : (item_end += 1) {}
+            i = if (item_end < content.len) item_end + 1 else item_end;
+        } else {
+            while (item_end < content.len and content[item_end] != ' ' and content[item_end] != '\t') : (item_end += 1) {}
+            i = item_end;
+        }
+
+        const item = std.mem.trim(u8, content[item_start..item_end], " \t");
+        if (item.len > 0) {
+            try result.append(allocator, try allocator.dupe(u8, item));
         }
     }
 
@@ -147,4 +163,61 @@ pub fn validatePkgBuild(pkgbuild: *const PkgBuild) !void {
     if (pkgbuild.arch.len == 0) {
         return error.MissingArch;
     }
+}
+
+test "parsePkgBuild parses required fields and arrays" {
+    const allocator = std.testing.allocator;
+    const content =
+        \\pkgname=demo
+        \\pkgver=1.2.3
+        \\pkgrel=4
+        \\pkgdesc="demo package"
+        \\arch=('x86_64' 'aarch64')
+        \\license=('MIT')
+        \\depends=('zig>=0.16' 'bash')
+        \\source=('https://example.invalid/demo.tar.gz')
+        \\sha256sums=('SKIP')
+    ;
+
+    var pkgbuild = try parsePkgBuild(allocator, content);
+    defer pkgbuild.deinit();
+
+    try std.testing.expectEqualStrings("demo", pkgbuild.pkgname);
+    try std.testing.expectEqualStrings("1.2.3", pkgbuild.pkgver);
+    try std.testing.expectEqualStrings("4", pkgbuild.pkgrel);
+    try std.testing.expectEqualStrings("demo package", pkgbuild.pkgdesc.?);
+    try std.testing.expectEqual(@as(usize, 2), pkgbuild.arch.len);
+    try std.testing.expectEqualStrings("x86_64", pkgbuild.arch[0]);
+    try std.testing.expectEqualStrings("aarch64", pkgbuild.arch[1]);
+    try std.testing.expectEqual(@as(usize, 2), pkgbuild.depends.len);
+    try std.testing.expectEqualStrings("zig>=0.16", pkgbuild.depends[0]);
+    try std.testing.expectEqualStrings("bash", pkgbuild.depends[1]);
+}
+
+test "parseArrayValue preserves spaces inside quoted items" {
+    const allocator = std.testing.allocator;
+    const items = try parseArrayValue(allocator, "source=('hello world.c' plain \"two words\")");
+    defer {
+        for (items) |item| allocator.free(item);
+        allocator.free(items);
+    }
+
+    try std.testing.expectEqual(@as(usize, 3), items.len);
+    try std.testing.expectEqualStrings("hello world.c", items[0]);
+    try std.testing.expectEqualStrings("plain", items[1]);
+    try std.testing.expectEqualStrings("two words", items[2]);
+}
+
+test "validatePkgBuild requires pkgname" {
+    const allocator = std.testing.allocator;
+    const content =
+        \\pkgver=1.0.0
+        \\pkgrel=1
+        \\arch=('x86_64')
+    ;
+
+    var pkgbuild = try parsePkgBuild(allocator, content);
+    defer pkgbuild.deinit();
+
+    try std.testing.expectError(error.MissingPkgName, validatePkgBuild(&pkgbuild));
 }

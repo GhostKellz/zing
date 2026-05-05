@@ -1,5 +1,16 @@
 .zig-cache/
+.zig-cache-fresh/
+.zig-global-cache-fresh/
 zig-out/
+examples/zig-project/.zig-cache/
+examples/zig-project/zig-out/
+examples/src/
+examples/pkg/
+examples/*.pkg.tar.zst
+examples/c-project/c-project
+examples/c-project/*.exe
+examples/*.exe
+examples/hello
 *.o
 *.exe
 CLAUDE.md

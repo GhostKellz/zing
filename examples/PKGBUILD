@@ -2,7 +2,7 @@
 pkgname=hello-world
 pkgver=1.0.0
 pkgrel=1
-pkgdesc="A simple hello world program for testing zmake"
+pkgdesc="A simple hello world program for testing zing"
 arch=('x86_64' 'i686')
 url="https://github.com/ghostkellz/hello-world"
 license=('MIT')

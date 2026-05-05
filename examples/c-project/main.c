@@ -2,7 +2,7 @@
 #include <stdlib.h>
 
 int main(int argc, char *argv[]) {
-    printf("Hello from C compiled with zmake! 🔥\n");
+    printf("Hello from C compiled with zing!\n");
     printf("Arguments: %d\n", argc);
     
     for (int i = 0; i < argc; i++) {

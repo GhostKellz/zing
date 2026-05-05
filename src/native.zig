@@ -152,13 +152,13 @@ pub fn analyzeZigProject(allocator: Allocator, io: Io, project_dir: []const u8) 
 }
 
 pub fn analyzeCProject(allocator: Allocator, io: Io, project_dir: []const u8) !CProject {
-    var sources: std.ArrayListUnmanaged([]const u8) = .{};
+    var sources: std.ArrayListUnmanaged([]const u8) = .empty;
     errdefer {
         for (sources.items) |s| allocator.free(s);
         sources.deinit(allocator);
     }
 
-    var headers: std.ArrayListUnmanaged([]const u8) = .{};
+    var headers: std.ArrayListUnmanaged([]const u8) = .empty;
     errdefer {
         for (headers.items) |h| allocator.free(h);
         headers.deinit(allocator);
@@ -184,12 +184,13 @@ pub fn analyzeCProject(allocator: Allocator, io: Io, project_dir: []const u8) !C
     }
 
     // Extract project name from directory
-    const name = Dir.path.basename(project_dir);
+    const basename = Dir.path.basename(project_dir);
+    const name = if (basename.len == 0 or std.mem.eql(u8, basename, ".")) "c-project" else basename;
 
     return CProject{
         .allocator = allocator,
         .io = io,
-        .name = try allocator.dupe(u8, if (name.len > 0) name else "c-project"),
+        .name = try allocator.dupe(u8, name),
         .version = try allocator.dupe(u8, "0.1.0"),
         .root_dir = try allocator.dupe(u8, project_dir),
         .sources = try sources.toOwnedSlice(allocator),
@@ -200,7 +201,7 @@ pub fn analyzeCProject(allocator: Allocator, io: Io, project_dir: []const u8) !C
 pub fn buildZigProject(allocator: Allocator, project: *ZigProject, target: ?[]const u8, release_mode: bool) !void {
     print("==> Building with zig build\n", .{});
 
-    var args: std.ArrayListUnmanaged([]const u8) = .{};
+    var args: std.ArrayListUnmanaged([]const u8) = .empty;
     defer args.deinit(allocator);
 
     try args.append(allocator, "zig");
@@ -212,7 +213,6 @@ pub fn buildZigProject(allocator: Allocator, project: *ZigProject, target: ?[]co
 
     if (target) |t| {
         const target_arg = try std.fmt.allocPrint(allocator, "-Dtarget={s}", .{t});
-        defer allocator.free(target_arg);
         try args.append(allocator, target_arg);
     }
 
@@ -221,7 +221,7 @@ pub fn buildZigProject(allocator: Allocator, project: *ZigProject, target: ?[]co
     };
 
     if (project.root_dir.len > 0 and !std.mem.eql(u8, project.root_dir, ".")) {
-        spawn_options.cwd = project.root_dir;
+        spawn_options.cwd = .{ .path = project.root_dir };
     }
 
     var child = try std.process.spawn(project.io, spawn_options);
@@ -247,7 +247,7 @@ pub fn buildCProject(allocator: Allocator, project: *CProject, target: ?[]const 
         return error.NoSources;
     }
 
-    var args: std.ArrayListUnmanaged([]const u8) = .{};
+    var args: std.ArrayListUnmanaged([]const u8) = .empty;
     defer args.deinit(allocator);
 
     try args.append(allocator, "zig");
@@ -267,7 +267,6 @@ pub fn buildCProject(allocator: Allocator, project: *CProject, target: ?[]const 
 
     if (target) |t| {
         const target_arg = try std.fmt.allocPrint(allocator, "-target={s}", .{t});
-        defer allocator.free(target_arg);
         try args.append(allocator, target_arg);
     }
 
@@ -293,4 +292,55 @@ pub fn createNativePackage(allocator: Allocator, project: *NativeProject, output
     _ = project;
     print("==> Creating package in: {s}\n", .{output_dir});
     // TODO: Implement package creation
+}
+
+test "detectProjectType identifies zig project" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "build.zig",
+        .data = "pub fn build(_: *@import(\"std\").Build) void {}\n",
+    });
+
+    const path = try std.fs.path.join(std.testing.allocator, &.{ ".zig-cache", "tmp", tmp.sub_path[0..] });
+    defer std.testing.allocator.free(path);
+
+    const project_type = try detectProjectType(std.testing.allocator, std.testing.io, path);
+    try std.testing.expectEqual(ProjectType.zig, project_type);
+}
+
+test "analyzeZigProject reads build.zig.zon metadata" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "build.zig.zon",
+        .data =
+        \\.{
+        \\    .name = .example_app,
+        \\    .version = "2.3.4",
+        \\    .fingerprint = 0x1234,
+        \\    .minimum_zig_version = "0.16.0-dev.3142+5ccfeb926",
+        \\    .dependencies = .{},
+        \\    .paths = .{"src"},
+        \\}
+        ,
+    });
+
+    const path = try std.fs.path.join(std.testing.allocator, &.{ ".zig-cache", "tmp", tmp.sub_path[0..] });
+    defer std.testing.allocator.free(path);
+
+    var project = try analyzeZigProject(std.testing.allocator, std.testing.io, path);
+    defer project.deinit();
+
+    try std.testing.expectEqualStrings("example_app", project.name);
+    try std.testing.expectEqualStrings("2.3.4", project.version);
+}
+
+test "analyzeCProject falls back to c-project for dot basename" {
+    var project = try analyzeCProject(std.testing.allocator, std.testing.io, ".");
+    defer project.deinit();
+
+    try std.testing.expectEqualStrings("c-project", project.name);
 }

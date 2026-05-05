@@ -2,6 +2,8 @@ const std = @import("std");
 const print = std.debug.print;
 const Allocator = std.mem.Allocator;
 const ArrayList = std.ArrayList;
+const Io = std.Io;
+const Dir = std.Io.Dir;
 const parser = @import("parser.zig");
 
 pub const PackageInfo = struct {
@@ -18,37 +20,35 @@ pub const PackageInfo = struct {
     depends: [][]const u8,
 
     pub fn generatePkgInfo(self: *const PackageInfo, allocator: Allocator) ![]const u8 {
-        var content = ArrayList(u8).init(allocator);
-        defer content.deinit();
+        var content: ArrayList(u8) = .empty;
+        defer content.deinit(allocator);
 
-        const writer = content.writer();
-
-        try writer.print("pkgname = {s}\n", .{self.pkgname});
-        try writer.print("pkgver = {s}\n", .{self.pkgver});
-        try writer.print("pkgrel = {s}\n", .{self.pkgrel});
+        try content.print(allocator, "pkgname = {s}\n", .{self.pkgname});
+        try content.print(allocator, "pkgver = {s}\n", .{self.pkgver});
+        try content.print(allocator, "pkgrel = {s}\n", .{self.pkgrel});
 
         if (self.pkgdesc) |desc| {
-            try writer.print("pkgdesc = {s}\n", .{desc});
+            try content.print(allocator, "pkgdesc = {s}\n", .{desc});
         }
 
         if (self.url) |u| {
-            try writer.print("url = {s}\n", .{u});
+            try content.print(allocator, "url = {s}\n", .{u});
         }
 
-        try writer.print("builddate = {d}\n", .{self.builddate});
-        try writer.print("packager = {s}\n", .{self.packager});
-        try writer.print("size = {d}\n", .{self.size});
-        try writer.print("arch = {s}\n", .{self.arch});
+        try content.print(allocator, "builddate = {d}\n", .{self.builddate});
+        try content.print(allocator, "packager = {s}\n", .{self.packager});
+        try content.print(allocator, "size = {d}\n", .{self.size});
+        try content.print(allocator, "arch = {s}\n", .{self.arch});
 
         for (self.license) |lic| {
-            try writer.print("license = {s}\n", .{lic});
+            try content.print(allocator, "license = {s}\n", .{lic});
         }
 
         for (self.depends) |dep| {
-            try writer.print("depend = {s}\n", .{dep});
+            try content.print(allocator, "depend = {s}\n", .{dep});
         }
 
-        return try content.toOwnedSlice();
+        return try content.toOwnedSlice(allocator);
     }
 };
 
@@ -75,11 +75,30 @@ pub const PackageArchiver = struct {
         };
     }
 
-    pub fn createPackage(self: *PackageArchiver, pkgbuild: *const parser.PkgBuild, pkg_dir: []const u8, output_path: []const u8) !void {
+    fn readFileAlloc(self: *PackageArchiver, io: Io, file: std.Io.File, max_size: usize) ![]u8 {
+        var result: ArrayList(u8) = .empty;
+        defer result.deinit(self.allocator);
+
+        var read_buffer: [4096]u8 = undefined;
+        var reader = std.Io.File.Reader.init(file, io, &read_buffer);
+        var chunk: [4096]u8 = undefined;
+
+        while (result.items.len < max_size) {
+            const remaining = max_size - result.items.len;
+            const limit = @min(chunk.len, remaining);
+            const bytes_read = try reader.interface.readSliceShort(chunk[0..limit]);
+            if (bytes_read == 0) break;
+            try result.appendSlice(self.allocator, chunk[0..bytes_read]);
+        }
+
+        return try result.toOwnedSlice(self.allocator);
+    }
+
+    pub fn createPackage(self: *PackageArchiver, io: Io, pkgbuild: *const parser.PkgBuild, pkg_dir: []const u8, output_path: []const u8) !void {
         print("==> Creating package archive: {s}\n", .{output_path});
 
         // Generate PKGINFO
-        const pkg_info = try self.generatePackageInfo(pkgbuild, pkg_dir);
+        const pkg_info = try self.generatePackageInfo(io, pkgbuild, pkg_dir);
         const pkginfo_content = try pkg_info.generatePkgInfo(self.allocator);
         defer self.allocator.free(pkginfo_content);
 
@@ -87,35 +106,36 @@ pub const PackageArchiver = struct {
         const pkginfo_path = try std.fs.path.join(self.allocator, &[_][]const u8{ pkg_dir, ".PKGINFO" });
         defer self.allocator.free(pkginfo_path);
 
-        var pkginfo_file = try std.fs.cwd().createFile(pkginfo_path, .{});
-        defer pkginfo_file.close();
-        try pkginfo_file.writeAll(pkginfo_content);
+        var pkginfo_file = try Dir.cwd().createFile(io, pkginfo_path, .{});
+        defer pkginfo_file.close(io);
+        try pkginfo_file.writeStreamingAll(io, pkginfo_content);
 
         // Generate MTREE (file manifest)
-        const mtree_content = try self.generateMtree(pkg_dir);
+        const mtree_content = try self.generateMtree(io, pkg_dir);
         defer self.allocator.free(mtree_content);
 
         const mtree_path = try std.fs.path.join(self.allocator, &[_][]const u8{ pkg_dir, ".MTREE" });
         defer self.allocator.free(mtree_path);
 
-        var mtree_file = try std.fs.cwd().createFile(mtree_path, .{});
-        defer mtree_file.close();
-        try mtree_file.writeAll(mtree_content);
+        var mtree_file = try Dir.cwd().createFile(io, mtree_path, .{});
+        defer mtree_file.close(io);
+        try mtree_file.writeStreamingAll(io, mtree_content);
 
         // Create tar.zst archive
-        try self.createTarZst(pkg_dir, output_path);
+        try self.createTarZst(io, pkg_dir, output_path);
 
         // Clean up metadata files
-        std.fs.cwd().deleteFile(pkginfo_path) catch {};
-        std.fs.cwd().deleteFile(mtree_path) catch {};
+        Dir.cwd().deleteFile(io, pkginfo_path) catch {};
+        Dir.cwd().deleteFile(io, mtree_path) catch {};
 
         // Get final package size
-        const pkg_stat = try std.fs.cwd().statFile(output_path);
+        const pkg_stat = try Dir.cwd().statFile(io, output_path, .{});
         print("✅ Package created: {s} ({d} KB)\n", .{ output_path, pkg_stat.size / 1024 });
     }
 
-    fn generatePackageInfo(self: *PackageArchiver, pkgbuild: *const parser.PkgBuild, pkg_dir: []const u8) !PackageInfo {
-        const size = try self.calculateDirectorySize(pkg_dir);
+    fn generatePackageInfo(self: *PackageArchiver, io: Io, pkgbuild: *const parser.PkgBuild, pkg_dir: []const u8) !PackageInfo {
+        const size = try self.calculateDirectorySize(io, pkg_dir);
+        const builddate = std.Io.Timestamp.now(io, .real).toSeconds();
 
         // Determine architecture
         const arch = if (pkgbuild.arch.len > 0) pkgbuild.arch[0] else "any";
@@ -126,8 +146,8 @@ pub const PackageArchiver = struct {
             .pkgrel = pkgbuild.pkgrel,
             .pkgdesc = pkgbuild.pkgdesc,
             .url = pkgbuild.url,
-            .builddate = std.time.timestamp(),
-            .packager = "zmake <zmake@localhost>",
+            .builddate = builddate,
+            .packager = "zing <zing@localhost>",
             .size = size,
             .arch = arch,
             .license = pkgbuild.license,
@@ -135,18 +155,18 @@ pub const PackageArchiver = struct {
         };
     }
 
-    fn calculateDirectorySize(self: *PackageArchiver, dir_path: []const u8) !u64 {
+    fn calculateDirectorySize(self: *PackageArchiver, io: Io, dir_path: []const u8) !u64 {
         var total_size: u64 = 0;
 
-        var dir = std.fs.cwd().openDir(dir_path, .{ .iterate = true }) catch return 0;
-        defer dir.close();
+        var dir = Dir.cwd().openDir(io, dir_path, .{ .iterate = true }) catch return 0;
+        defer dir.close(io);
 
         var walker = try dir.walk(self.allocator);
         defer walker.deinit();
 
-        while (try walker.next()) |entry| {
+        while (try walker.next(io)) |entry| {
             if (entry.kind == .file) {
-                const stat = dir.statFile(entry.path) catch continue;
+                const stat = dir.statFile(io, entry.path, .{}) catch continue;
                 total_size += stat.size;
             }
         }
@@ -154,37 +174,36 @@ pub const PackageArchiver = struct {
         return total_size;
     }
 
-    fn generateMtree(self: *PackageArchiver, pkg_dir: []const u8) ![]const u8 {
-        var content = ArrayList(u8).init(self.allocator);
-        defer content.deinit();
-
-        const writer = content.writer();
-
+    fn generateMtree(self: *PackageArchiver, io: Io, pkg_dir: []const u8) ![]const u8 {
         // MTREE header
-        try writer.writeAll("#mtree\n");
-        try writer.writeAll("/set type=file uid=0 gid=0 mode=644\n");
+        var content: ArrayList(u8) = .empty;
+        defer content.deinit(self.allocator);
 
-        var dir = std.fs.cwd().openDir(pkg_dir, .{ .iterate = true }) catch {
+        try content.appendSlice(self.allocator, "#mtree\n");
+        try content.appendSlice(self.allocator, "/set type=file uid=0 gid=0 mode=644\n");
+
+        var dir = Dir.cwd().openDir(io, pkg_dir, .{ .iterate = true }) catch {
             return try self.allocator.dupe(u8, "#mtree\n");
         };
-        defer dir.close();
+        defer dir.close(io);
 
         var walker = try dir.walk(self.allocator);
         defer walker.deinit();
 
-        var entries = ArrayList([]const u8).init(self.allocator);
+        var entries: ArrayList([]const u8) = .empty;
         defer {
             for (entries.items) |entry| self.allocator.free(entry);
-            entries.deinit();
+            entries.deinit(self.allocator);
         }
 
-        while (try walker.next()) |entry| {
+        while (try walker.next(io)) |entry| {
             if (entry.kind == .file and !std.mem.startsWith(u8, entry.path, ".")) {
-                const stat = dir.statFile(entry.path) catch continue;
+                const stat = dir.statFile(io, entry.path, .{}) catch continue;
+                const digest = try self.fileSha256(io, dir, entry.path);
+                defer self.allocator.free(digest);
 
-                const mtree_entry = try std.fmt.allocPrint(self.allocator, "./{s} size={d} md5digest={s}\n", .{ entry.path, stat.size, "00000000000000000000000000000000" } // Placeholder MD5
-                );
-                try entries.append(mtree_entry);
+                const mtree_entry = try std.fmt.allocPrint(self.allocator, "./{s} size={d} sha256digest={s}\n", .{ entry.path, stat.size, digest });
+                try entries.append(self.allocator, mtree_entry);
             }
         }
 
@@ -197,45 +216,65 @@ pub const PackageArchiver = struct {
         }.lessThan);
 
         for (entries.items) |entry| {
-            try writer.writeAll(entry);
+            try content.appendSlice(self.allocator, entry);
         }
 
-        return try content.toOwnedSlice();
+        return try content.toOwnedSlice(self.allocator);
     }
 
-    fn createTarZst(self: *PackageArchiver, source_dir: []const u8, output_path: []const u8) !void {
+    fn fileSha256(self: *PackageArchiver, io: Io, dir: Dir, relative_path: []const u8) ![]const u8 {
+        var file = try dir.openFile(io, relative_path, .{});
+        defer file.close(io);
+
+        var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+        var read_buffer: [8192]u8 = undefined;
+        var reader = std.Io.File.Reader.init(file, io, &read_buffer);
+        var chunk: [8192]u8 = undefined;
+
+        while (true) {
+            const bytes_read = try reader.interface.readSliceShort(&chunk);
+            if (bytes_read == 0) break;
+            hasher.update(chunk[0..bytes_read]);
+        }
+
+        var hash_bytes: [32]u8 = undefined;
+        hasher.final(&hash_bytes);
+
+        return try std.fmt.allocPrint(self.allocator, "{x}", .{hash_bytes});
+    }
+
+    fn createTarZst(self: *PackageArchiver, io: Io, source_dir: []const u8, output_path: []const u8) !void {
         print("==> Compressing package with zstd (level {d})...\n", .{self.compression_level});
 
         const compression_arg = try std.fmt.allocPrint(self.allocator, "zstd -{d}", .{self.compression_level});
         defer self.allocator.free(compression_arg);
 
-        var child = std.process.Child.init(&[_][]const u8{
-            "tar",
-            "--use-compress-program",
-            compression_arg,
-            "-cf",
-            output_path,
-            "-C",
-            source_dir,
-            ".",
-        }, self.allocator);
+        var child = try std.process.spawn(io, .{
+            .argv = &[_][]const u8{
+                "tar",
+                "--use-compress-program",
+                compression_arg,
+                "-cf",
+                output_path,
+                "-C",
+                source_dir,
+                ".",
+            },
+            .stderr = .pipe,
+        });
 
-        child.stderr_behavior = .Pipe;
-
-        try child.spawn();
-
-        const stderr = try child.stderr.?.readToEndAlloc(self.allocator, 1024 * 1024);
+        const stderr = try self.readFileAlloc(io, child.stderr.?, 1024 * 1024);
         defer self.allocator.free(stderr);
 
-        const result = try child.wait();
+        const result = try child.wait(io);
 
-        if (result != .Exited or result.Exited != 0) {
+        if (result != .exited or result.exited != 0) {
             print("❌ tar command failed:\n{s}\n", .{stderr});
             return error.ArchiveCreationFailed;
         }
     }
 
-    pub fn signPackage(self: *PackageArchiver, package_path: []const u8, gpg_key: ?[]const u8) !void {
+    pub fn signPackage(self: *PackageArchiver, io: Io, package_path: []const u8, gpg_key: ?[]const u8) !void {
         const key_arg = gpg_key orelse {
             print("⚠️  No GPG key specified, skipping package signing\n", .{});
             return;
@@ -246,21 +285,23 @@ pub const PackageArchiver = struct {
         const sig_path = try std.fmt.allocPrint(self.allocator, "{s}.sig", .{package_path});
         defer self.allocator.free(sig_path);
 
-        var child = std.process.Child.init(&[_][]const u8{
-            "gpg",
-            "--detach-sign",
-            "--use-agent",
-            "--no-armor",
-            "--local-user",
-            key_arg,
-            "--output",
-            sig_path,
-            package_path,
-        }, self.allocator);
+        var child = try std.process.spawn(io, .{
+            .argv = &[_][]const u8{
+                "gpg",
+                "--detach-sign",
+                "--use-agent",
+                "--no-armor",
+                "--local-user",
+                key_arg,
+                "--output",
+                sig_path,
+                package_path,
+            },
+        });
 
-        const result = try child.spawnAndWait();
+        const result = try child.wait(io);
 
-        if (result != .Exited or result.Exited != 0) {
+        if (result != .exited or result.exited != 0) {
             print("❌ GPG signing failed\n", .{});
             return error.SigningFailed;
         }
@@ -268,31 +309,30 @@ pub const PackageArchiver = struct {
         print("✅ Package signed: {s}\n", .{sig_path});
     }
 
-    pub fn verifyPackage(self: *PackageArchiver, package_path: []const u8) !bool {
+    pub fn verifyPackage(self: *PackageArchiver, io: Io, package_path: []const u8) !bool {
         print("==> Verifying package integrity: {s}\n", .{package_path});
 
         // Test extraction without actually extracting
-        var child = std.process.Child.init(&[_][]const u8{
-            "tar",
-            "--use-compress-program=zstd",
-            "-tf",
-            package_path,
-        }, self.allocator);
+        var child = try std.process.spawn(io, .{
+            .argv = &[_][]const u8{
+                "tar",
+                "--use-compress-program=zstd",
+                "-tf",
+                package_path,
+            },
+            .stdout = .pipe,
+            .stderr = .pipe,
+        });
 
-        child.stdout_behavior = .Pipe;
-        child.stderr_behavior = .Pipe;
-
-        try child.spawn();
-
-        const stdout = try child.stdout.?.readToEndAlloc(self.allocator, 1024 * 1024);
+        const stdout = try self.readFileAlloc(io, child.stdout.?, 1024 * 1024);
         defer self.allocator.free(stdout);
 
-        const stderr = try child.stderr.?.readToEndAlloc(self.allocator, 1024 * 1024);
+        const stderr = try self.readFileAlloc(io, child.stderr.?, 1024 * 1024);
         defer self.allocator.free(stderr);
 
-        const result = try child.wait();
+        const result = try child.wait(io);
 
-        if (result != .Exited or result.Exited != 0) {
+        if (result != .exited or result.exited != 0) {
             print("❌ Package verification failed:\n{s}\n", .{stderr});
             return false;
         }
@@ -315,3 +355,37 @@ pub const PackageArchiver = struct {
         return true;
     }
 };
+
+test "verifyPackage accepts archive with metadata files" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.createDirPath(std.testing.io, "pkg/usr/bin");
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "pkg/usr/bin/demo",
+        .data = "#!/bin/sh\necho demo\n",
+    });
+
+    var pkgbuild = try parser.parsePkgBuild(std.testing.allocator,
+        \\pkgname=demo
+        \\pkgver=1.0.0
+        \\pkgrel=1
+        \\pkgdesc="demo"
+        \\arch=('x86_64')
+        \\license=('MIT')
+    );
+    defer pkgbuild.deinit();
+
+    const root_path = try std.fs.path.join(std.testing.allocator, &.{ ".zig-cache", "tmp", tmp.sub_path[0..] });
+    defer std.testing.allocator.free(root_path);
+
+    const pkg_dir = try std.fs.path.join(std.testing.allocator, &.{ root_path, "pkg" });
+    defer std.testing.allocator.free(pkg_dir);
+
+    const out_path = try std.fs.path.join(std.testing.allocator, &.{ root_path, "demo-1.0.0-1-x86_64.pkg.tar.zst" });
+    defer std.testing.allocator.free(out_path);
+
+    var archiver = PackageArchiver.init(std.testing.allocator);
+    try archiver.createPackage(std.testing.io, &pkgbuild, pkg_dir, out_path);
+    try std.testing.expect(try archiver.verifyPackage(std.testing.io, out_path));
+}
